@@ -1,0 +1,1200 @@
+// -------------------------------------------------------------------
+//
+//	Code in GAUSS programming language (version 17.0). 
+//	All the code, except the "plot" commands that generate the graphs/figures 
+//	is compatible with versions 11.0 or older of GAUSS.
+//
+//      Program to create Tables 3 and 4 and Figures 1 and 2 in:     
+//
+//      "Identification and Estimation of Dynamic Games 
+//       When Players Beliefs are Not in Equilibrium"
+//            (Aguirregabiria and Magesan, 2019)
+//                           
+//
+//        Victor Aguirregabiria and Arvind Magesan
+//        First version:  April 21, 2017
+//        This version:    June 08, 2017
+// -------------------------------------------------------------------
+//       NOTES:
+//       1)  User selects whether beliefs are in equilibrium or not    
+//           by setting Lambda=1 or 0.5 respectively. 
+//       2)  To create Table 3 and the Figures, set m=500 and nsim=10,000.
+//           To create Table 4, set m=1000000 and nsim=1
+// ---------------------------------------------------------------------
+//
+//  OUTLINE OF THE PROGRAM
+//		
+//		Preamble: Programs to be used repeatedly in main program
+//
+//      1. MODEL
+//          1.1. Parameters 
+//          1.2. Values of State Variables and State Space
+//          1.3. Transition matrices of State Variables and States where game is in equilibrium 
+//          1.4. One-period payoff function
+//
+//      2. SOLUTION: Computing *Equilibrium* Choice probabilities. For each market type:
+//			2.1  Procedure for obtaining equilibria that we will use repeatedly
+//			2.2  Obtain MP Equilibrium CCPS for each player and mkt type
+//
+//------------------MONTE CARLO LOOP STARTS HERE--------------------------
+//
+//      3. Data Generation
+//
+//      4. Test of Equilibrium Beliefs
+//
+//      5. Non Parametric Estinmation of:
+//         a.) g_function
+//         b.) beliefs
+//         c.) payoff differences
+//         d.) payoffs
+//
+//      6. Parametric Estimation of Beliefs and Payoffs Using NPL
+//          6.1 Estimate Player 1's payoffs parametrically without imposing equilibrium restrictions
+//          6.2 Estimate Player 1's payoffs parametrically without imposing equilibrium restrictions
+//
+//------------------MONTE CARLO LOOP ENDS HERE--------------------------
+//
+//      7. Monte Carlo Results
+//          7.1 Test
+//          7.2 Parametric Payoffs
+//          7.3 Parametric Beliefs
+//          7.4 Parametric CCPs
+//---------------------------------------------------------------------
+
+new;
+library pgraph gauss ;
+seed = 5333799;
+tol = 1e-12;
+
+
+//-------------------------------
+//		Preamble
+//-------------------------------
+
+
+/*
+** CLOGIT  -  Maximum Likelihood estimation of McFadden's Conditional Logit
+**            Some parameters can be restricted
+**            Optimization algorithm: Newton's method with analytical 
+**            gradient and hessian
+**
+** by Victor Aguirregabiria
+**      Last version:  December, 2001
+**
+** Format      {best,varest} = clogit(ydum,x,restx,namesb)
+**
+** Input        ydum    - (nobs x 1) vector of observations of dependet variable
+**                        Categorical variable with values: {1, 2, ..., nalt}
+**
+**              x       - (nobs x (k * nalt)) matrix of explanatory variables
+**                        associated with unrestricted parameters.
+**                        First k columns correspond to alternative 1, and so on
+**
+**              restx   - (nobs x nalt) vector of the sum of the explanatory
+**                        variables whose parameters are restricted to be
+**                        equal to 1.
+**
+**              namesb  - (k x 1) vector with names of parameters
+**
+**
+**  Output      best    - (k x 1) vector with ML estimates.
+**
+**              varest  - (k x k) matrix with estimate of covariance matrix
+**
+*/
+
+proc (3) = clogit(ydum,x,restx,namesb) ;
+  local cconvb, myzero, nobs, nalt, npar, xysum, j,
+        iter, criter, llike, b0, phat, sumpx, xxm, xbuff,
+        d1llike, d2llike, b1, Avarb, sdb, tstat, 
+        numyj, logL0, lrindex, invertible ;
+
+  cconvb = 1e-6 ;
+  myzero = 1e-16 ;
+  nobs = rows(ydum) ;
+  nalt = maxc(ydum) ;
+  npar = cols(x)/nalt ;
+  if npar/=rows(namesb) ;
+    "ERROR: Dimensions of x";; npar;; "and of names(b0)";; rows(namesb) ;;
+    "do not match " ;
+    end ;
+  endif;
+
+  xysum = 0 ;
+  j=1;
+  do while j<=nalt ;
+    xysum = xysum + sumc( (ydum.==j).*x[.,npar*(j-1)+1:npar*j] ) ;
+    j=j+1 ;
+  endo ;
+
+  iter=1 ;
+  criter = 1000 ;
+  llike = -nobs ;
+  b0 = zeros(npar,1)-(1e-3);
+
+  do while (criter>cconvb) ;
+  
+    "" ;
+    "Iteration                = " iter ;
+    "Log-Likelihood function  = " llike ;
+    "Norm of b(k)-b(k-1)      = " criter ;
+    "" ;
+  
+    @ Computing probabilities @
+    phat = zeros(nobs,nalt) ;
+    j=1 ;
+    do while j<=nalt ;
+      phat[.,j] = x[.,npar*(j-1)+1:npar*j]*b0 + restx[.,j] ;
+      j=j+1 ;
+    endo ;
+    phat = phat - maxc(phat') ;
+    phat = exp(phat)./sumc(exp(phat')) ;
+
+    @ Computing xmean @
+    sumpx = zeros(nobs,1) ;
+    xxm = 0 ;
+    llike = 0 ;
+    j=1;
+    do while j<=nalt ;
+      xbuff = x[.,npar*(j-1)+1:npar*j] ; 
+      sumpx = sumpx + phat[.,j] .*xbuff ;
+      xxm = xxm + (phat[.,j].*xbuff)'*xbuff ;
+      llike = llike
+            + sumc( (ydum.==j)
+                    .* ln( (phat[.,j].> myzero).*phat[.,j]
+                         + (phat[.,j].<=myzero).*myzero    ) ) ;
+      j=j+1 ;
+    endo ;
+
+    @ Computing gradient @
+    d1llike = xysum - sumc(sumpx) ;
+
+    @ Computing hessian @    
+    d2llike = - (xxm - sumpx'*sumpx) ;
+    
+    @ Gauss iteration @
+      invertible = abs(det(d2llike))>0;
+        if invertible==1;
+    
+    b1 = b0 - inv(d2llike)*d1llike ;
+    criter = sqrt( (b1-b0)'*(b1-b0) ) ;
+    b0 = b1 ;
+    iter = iter + 1 ;
+        else; 
+     b0 = zeros(npar,1); 
+      criter = 0;
+        endif;      
+  endo ;
+  if invertible==1;
+  Avarb  = inv(-d2llike) ;
+  sdb    = sqrt(diag(Avarb)) ;
+  tstat  = b0./sdb ;
+  
+  numyj  = sumc(ydum.==(seqa(1,1,nalt)')) ;
+  logL0  = sumc(numyj.*ln(numyj./nobs)) ;
+  lrindex = 1 - llike/logL0 ;
+
+  "---------------------------------------------------------------------";
+  "Number of Iterations     = " iter ;
+  "Number of observations   = " nobs ;
+  "Log-Likelihood function  = " llike ;
+  "Likelihood Ratio Index   = " lrindex ;
+  "---------------------------------------------------------------------";
+  "       Parameter         Estimate        Standard        t-ratios";
+  "                                         Errors" ;
+  "---------------------------------------------------------------------";
+  j=1;
+  do while j<=npar;
+    print $namesb[j];;b0[j];;sdb[j];;tstat[j];
+    j=j+1 ;
+  endo;
+  "---------------------------------------------------------------------";
+  else;
+      Avarb = 0;
+  endif;
+  retp(b0,Avarb, invertible) ;
+endp ;
+
+
+
+//Program to find a vector in a matrix
+proc indfind(vec_in, mat_in);
+ local therand, lhs, rhs, chk ;
+   therand = rndus(1,cols(vec_in),seed);
+   lhs = sumr(therand.*vec_in);
+   rhs = sumr(therand.*mat_in);
+   chk = lhs.==rhs;
+   chk = indexcat(chk,maxc(chk));
+retp(chk);
+endp;
+
+//Program to pull out unique rows from a matrix
+proc uniquerows(y0);
+ local y, therandb;
+ therandb = rndu(1,cols(y0));
+ y = y0 .*(therandb);
+ y = sumr(y);
+ y = uniqindx(y,1);
+ y = y0[y,.];
+ y = sortmc(y, seqa(1,1,cols(y)));
+retp(y);
+endp;
+
+
+
+/****************************************************************************************************************/
+
+/*****************************************  Main Program Begins Here    *****************************************/
+
+/****************************************************************************************************************/
+
+// ---------------------------------------------------------------------------------
+//  1.      Model
+// ---------------------------------------------------------------------------------
+
+// 1.1 Set structural parameters 
+
+
+// Player 1 
+theta_10 = 2.4;
+theta_11 = 0;
+theta_12 = 3.0;
+theta_13 = 0.5;
+
+
+// Player 2 
+theta_20 = 2.4;
+theta_21 = -1.0;
+theta_22 = 3.0;
+theta_23 = 0.5;
+
+//Discount factor
+betad = 0.95;
+
+// Matrix of true payoff parameters, each column is a player
+
+theta_0 = (theta_10|theta_11|theta_12|theta_13)
+        ~ (theta_20|theta_21|theta_22|theta_23);
+
+// "Bias" is the parameter that determines whether beliefs are in equilibrium or not
+//  If "Bias"=1 then beliefs are in equilibrium. 
+//  To get results in Aguirregabiria and Magesan (2019) for biased beliefs, set bias = 0.5 
+bias = 1;
+
+
+// 1.2  State Variables and State Space 
+
+//  Note: 
+//  'states' is the matrix with all the common knowledge
+//  state variables. 
+//      Number of columns   = # of variables 
+//                          = {Yit-1, Yjt-1, Zjt }
+//
+//      Number of rows      = # of states = 2*2*numz
+//         Rows are sorted, in this order, by Yit-1, Yjt-1, Zjt
+//
+
+
+num_z = 5;
+z_incre = 1;
+z_jt = seqa(-2,z_incre,num_z);
+
+Y_itm1 = 0|1;
+
+states = (Y_itm1.*.ones(2,1) )~(ones(2,1).*.Y_itm1);
+states = (states.*.ones(rows(z_jt),1) )~(ones(rows(states),1).*.z_jt);
+Y_states = states[.,1:2];
+numstate = rows(states);
+
+
+// 1.3  Transition of State Variables 
+
+// Exogenous transition of z_it: we assume that z_it is i.i.d (wrt time) uniform in each market
+zj_tran = (1/rows(z_jt))*ones(rows(z_jt), rows(z_jt));
+
+zj_tran_cdf = cumsumc(zj_tran');
+zj_tran_cdf = zj_tran_cdf';
+
+// Creating transitions for each player for each action 
+// and stacking them into an array.
+// First two matrices are player 1 for action 0 and 1, 
+// second two are player 2...
+
+excomp = ones(4,4).*.zj_tran;
+
+ord = 2*2|rows(states)|rows(states); 
+own_full_tran = arrayalloc(ord,0);
+
+// Creating Player 1's matrices
+
+inact = zeros(rows(states),1).==states[.,1];
+own_full_tran[1,.,.] = (inact').*excomp;
+
+act = ones(rows(states),1).==states[.,1];
+own_full_tran[2,.,.] = (act').*excomp;
+
+// Creating Player 2's matrices
+inact = zeros(rows(states),1).==states[.,2];
+own_full_tran[3,.,.] = (inact').*excomp;
+
+act = ones(rows(states),1).==states[.,2];
+own_full_tran[4,.,.] = (act').*excomp;
+
+      //Exogenous transition matrices
+		y0_2 =( ( 0.^(Y_states[.,2]') ).*( (1).^(1-Y_states[.,2]')));
+		ftran_00 = y0_2.*arraytomat(own_full_tran[2*(0)+1,.,.]);
+		ftran_10 = y0_2.*arraytomat(own_full_tran[2*(1),.,.]);
+		y1_2 = (( 1.^(Y_states[.,2]') ).*( (0).^(1-Y_states[.,2]')));
+		ftran_01 = y1_2.*arraytomat(own_full_tran[2*(0)+1,.,.]);
+		ftran_11 = y1_2.*arraytomat(own_full_tran[2*(1),.,.]);
+
+//The final "parameter" we need to set is the states where the game is in equilibrium
+//We assume the game is in a particular equilibrium (the one where player 1 enters with higher probability) 
+//   when either of the players' z variables are at their endpoints
+
+z_min = z_jt[1];							//These are the endpoints of the z variable
+z_max = z_jt[rows(z_jt)];
+
+z_ex =  (states[.,3].==z_min) + (states[.,3].==z_max) ;
+z_ex = z_ex.>0;
+z_in = 1-z_ex;
+z_ex = indexcat(z_ex, maxc(z_ex));
+z_in = indexcat(z_in, maxc(z_in));
+
+beq = bias.==1;
+zt = states[.,3];
+at_z_ex = (zt.==z_min) + (zt.==z_max) ;
+at_z_ex = at_z_ex.>0;
+
+lambda_1 = at_z_ex + bias*(1-at_z_ex);
+lambda_2 = at_z_ex + bias*(1-at_z_ex);
+
+
+//1.4 Construct True Payoff Function
+true_pi = {};
+zfun = {};
+i0 = 1;
+do while i0<=2;
+	othind = (i0.== seqa(1,1,2));
+    othind = indexcat(othind,minc(othind));
+	theta_i0 = theta_0[.,i0];
+	States_i0 = States[.,(i0-1)+1]~ states[.,3] ;
+	pi_i0_0 = (ones(rows(states),1)~states_i0[.,2]~(zeros(rows(states),1))~(states_i0[.,1]))*theta_i0; 
+	pi_i0_1 = (ones(rows(states),1)~states_i0[.,2]~(-ones(rows(states),1))~(states_i0[.,1]))*theta_i0;
+    z_i0_0 = (ones(rows(states),1)~states_i0[.,2]~(zeros(rows(states),1))~(states_i0[.,1]));
+	z_i0_1 = (ones(rows(states),1)~states_i0[.,2]~(-ones(rows(states),1))~(states_i0[.,1]));
+	true_pi = true_pi~pi_i0_0~pi_i0_1;
+    zfun = zfun~z_i0_0~z_i0_1;
+	i0 = i0+1;
+endo;
+profit1_0 = true_pi[.,1];           //player 1's profit over all states when player 2 is out
+profit1_1 = true_pi[.,2];           //player 1's profit over all states when player 2 is in
+profit2_0 = true_pi[.,3];           //player 2's profit over all states when player 1 is out
+profit2_1 = true_pi[.,4];           //player 2's profit over all states when player 1 is in
+
+Z1_0 = zfun[.,1:4];                 //player 1's Z states when player 2 is out
+Z1_1 = zfun[.,5:8];                 //player 1's Z states when player 2 is in
+Z2_0 = zfun[.,9:12];                //player 2's Z states when player 1 is out
+Z2_1 = zfun[.,13:16];               //player 2's Z states when player 1 is in
+
+// -----------------------------------------------------------------------------------------------
+//  2.      Solution: Obtaining the Markov Perfect Equilibrium CCPS of the infinite horizon game 
+//				  
+// -----------------------------------------------------------------------------------------------
+
+
+// ------------------------------------------------------
+//      2.1. Procedure for equilibrium mapping
+// ------------------------------------------------------
+
+// This procedure takes as inputs a guess of choice probabilities for the two players 
+// and returns the best response choice probabilities. 
+
+proc (1) = MPE_br(pin, eqm);
+  local  P1, P2, B1, B2, ZP1, ZP2, zbarP1, zbarP2, e0_P1, e1_P1, e0_P2, e1_P2, ebarP1, ebarP2, FP_1_1, FP_1_0, FP_2_1, FP_2_0, FbarP_1, FbarP_2, 
+         W1Pz, W2Pz, W1Pe, W2Pe, v1P_1, v0P_1, v1P_2, v0P_2, P1out, P2out, pout;
+    P1 = pin[.,1]; 
+    P2 = pin[.,2];
+  //Create choice specific values for each player given flow profit and guess of choice probabilities  
+    if eqm ==1;
+    B1 = P1;          //Player 2's Belief  = Player 1's CCP if eqm==1
+    B2 = P2;          //Player 1's Belief= Player 2's CCP  if eqm==1
+    else;
+    B1 = lambda_2.*P1;          //Player 2's Belief = biased fn of Player 1's CCP  if eqm\=1
+    B2 = lambda_1.*P2;          //Player 1's Belief = biased fn of Player 2's CCP  if eqm\=1
+    endif;
+    ZP1 = B2.*Z1_1 + (1-B2).*Z1_0;
+    ZP2 = B1.*Z2_1 + (1-B1).*Z2_0;
+    
+    e0_P1 = 0.5772156649 - ln(1-P1);
+    e1_P1 = 0.5772156649 - ln(P1);
+    e0_P2 = 0.5772156649 - ln(1-P2);
+    e1_P2 = 0.5772156649 - ln(P2);
+       
+    zbarP1 = P1.*ZP1; 
+    zbarP2 = P2.*ZP2;
+    
+    ebarP1 = P1.*e1_P1 + (1-P1).*e0_P1; 
+    ebarP2 = P2.*e1_P2 + (1-P2).*e0_P2; 
+    
+    FP_1_1 = B2.*ftran_11 + (1-B2).*ftran_10;
+    FP_1_0 = B2.*ftran_01 + (1-B2).*ftran_00;
+    FP_2_1 = B1.*ftran_11 + (1-B1).*ftran_01;
+    FP_2_0 = B1.*ftran_10 + (1-B1).*ftran_00;
+    FbarP_1 = P1.*FP_1_1 + (1-P1).*FP_1_0;
+    FbarP_2 = P2.*FP_2_1 + (1-P2).*FP_2_0;
+    W1Pz = inv(eye(rows(FbarP_1))-betad*FbarP_1 )*zbarP1;
+    W2Pz = inv(eye(rows(FbarP_2))-betad*FbarP_2 )*zbarP2;
+    W1Pe = inv(eye(rows(FbarP_1))-betad*FbarP_1 )*ebarP1;
+    W2Pe = inv(eye(rows(FbarP_2))-betad*FbarP_2 )*ebarP2;
+    v1P_1 = (ZP1 + betad*FP_1_1*W1Pz)*theta_0[.,1] + betad*FP_1_1*W1Pe;
+    v0P_1 = (zeros(rows(zbarP1), cols(zbarP1)) + betad*FP_1_0*W1Pz  )*theta_0[.,1] + betad*FP_1_0*W1Pe;
+    v1P_2 = (ZP2 + betad*FP_2_1*W2Pz)*theta_0[.,2] + betad*FP_2_1*W2Pe;
+    v0P_2 = (zeros(rows(zbarP2), cols(zbarP2)) + betad*FP_2_0*W2Pz  )*theta_0[.,2] + betad*FP_2_0*W2Pe;
+    P1out = exp(v1P_1)./(exp(v0P_1)+exp(v1P_1));
+    P2out = exp(v1P_2)./(exp(v0P_2)+exp(v1P_2));
+    pout =  P1out~P2out;
+  retp(pout) ;
+endp ;
+  
+// ------------------------------------------------------
+//      2.2. Solve for equilibria
+// ------------------------------------------------------
+
+//Solve for beliefs in equilibrium CCPs
+pin = 1e-4*ones(numstate,2);
+pout = pin./2; 
+crit = maxc(maxc(abs(pin-pout)));
+iter = 1;
+do while crit>=tol;
+pout = MPE_br(pin, 1);  
+   crit = maxc(maxc(abs(pin-pout)));
+   pin = pout; 
+    iter = iter+1;
+endo;
+
+peq_1 = pout[.,1];
+peq_2 = pout[.,2];
+
+//Solve for biased-beliefs in equilibrium CCPs
+p_in = 1e-4*ones(numstate,1);
+pout = pin./2; 
+crit = maxc(maxc(abs(pin-pout)));
+iter = 1;
+do while crit>=tol;
+pout = MPE_br(pin, 0);  
+   crit = maxc(maxc(abs(pin-pout)));
+   pin = pout; 
+    iter = iter+1;
+endo;
+pnoeq_1 = pout[.,1];
+pnoeq_2 = pout[.,2];
+
+//Players' beliefs in the DGP
+if beq==1;
+ //Player 1 
+ beliefs_2 = peq_2;    
+//Player 2 
+ beliefs_1 = peq_1; 
+ CP_true = peq_1~peq_2; 
+ Q1_true = ln(peq_1)-ln(1-peq_1);   
+else;
+//Player 1 
+ beliefs_2 = lambda_1 .*pnoeq_2;    
+//Player 2 
+ beliefs_1 = lambda_2 .*pnoeq_1; 
+ CP_true = pnoeq_1~pnoeq_2;
+ Q1_true = ln(pnoeq_1)-ln(1-pnoeq_1);    
+endif;
+
+ //Get true gfunction 
+    g_true = zeros(numstate,2);
+    z0 = 1;
+    do while z0<=4;
+    eqmpts = z_ex[(2*(z0-1)+1)|2*z0];     
+    X = (beliefs_2[eqmpts[1]]~(1-beliefs_2[eqmpts[1]]))|(beliefs_2[eqmpts[2]]~(1-beliefs_2[eqmpts[2]]));
+    Y = Q1_true[eqmpts];
+    thisg0 = inv(X'X)*X'Y;    
+    g_true[seqa(eqmpts[1],1,5),.] = (thisg0').*ones(5,1);
+    z0 = z0+1;
+    endo;
+
+
+
+//MONTE CARLO SIMULATION LOOP STARTS HERE
+nsim =  10000;
+
+
+//Objects from Test:
+//      Collect Unrestricted and Restricted CCP estimates
+estCCP = {};
+rawestCCP = {};
+
+//      Collect Likelihood Ratio test statistics
+kept = 0;
+convergence = 0; 
+lrt = {};
+
+//Objects from Payoff and Belief Estimation:
+
+//      Collect Non-parametric payoff and Belief Estimates
+np_gfun_est = {};
+np_belief_est = {};
+np_payoff_diff_est = {};    
+np_payoff_est = {};
+  
+//      Collect Parametric Payoff and Belief Estimates
+p_payoff_est_no_eq = {};
+p_belief_est_no_eq = {};
+p_cp_est_no_eq = {};
+
+p_payoff_est_eq = {};
+p_belief_est_eq = {};
+p_cp_est_eq = {};
+
+sim0 = 1;                                                             //Simulation counter
+do while sim0<=nsim;
+
+// -----------------------------------
+//  3.         Data Generation        
+// -----------------------------------
+M = 500;																//Number of markets
+Tdata = 5;                                                              //Number of Time periods in Data
+
+//Set initial conditions for each market: 
+
+//We will assume that for t=1 (initial states):
+// states with (y_1t-1, y_2t-1) = (0,0) occur 25% of the time  
+// states with (y_1t-1, y_2t-1) = (1,0) occur 25% of the time
+// states with (y_1t-1, y_2t-1) = (0,1) occur 25% of the time
+// states with (y_1t-1, y_2t-1) = (1,1) occur 25% of the time
+
+Iy_grid = 0.25|0.25|0.25|0.25;
+Iy_grid = cumsumc(Iy_grid);
+ym1 = (0~0)|(1~0)|(0~1)|(1~1);
+Iz_grid = (1/(rows(z_jt)))*ones(rows(z_jt),1);
+Iz_grid = cumsumc(Iz_grid);
+zm1 = z_jt;
+Initial_states = {};
+m0 = 1;
+do while m0<=M;
+this_yij = sumc(rndus(1,1,seed).>Iy_grid)+1;
+this_yij = ym1[this_yij,.];
+this_zij = sumc(rndus(1,1,seed).>Iz_grid)+1;
+this_zij = zm1[this_zij,.];
+initial_states = Initial_states|(this_yij[1]~this_yij[2]~this_zij[1]);
+	m0 = m0+1;
+endo;
+    
+    
+//Outer loop in markets: for each market we create a sequence of data T periods long
+
+State_Data_full = {};
+Action_Data_full = {};
+m0 = 1;
+do while m0<=M;
+	
+//Generate Tdata periods of data 
+t0 = 1;
+state_m1 = initial_states[m0,.];
+state_data = state_m1;
+action_data = {};
+do while t0<=Tdata;
+
+    //Find index of current state in state matrix
+	state_m1i = indfind(state_m1, states);                       
+    
+   	//Draw new z here 
+	zstate_m1i = states[state_m1i,3];
+    zstate_m1i = indfind(zstate_m1i, z_jt); 
+    new_z = rndus(1,1,seed).<=zj_tran_cdf[zstate_m1i,.]';
+    new_z = indexcat(new_z,1);
+    new_z = minc(new_z);
+	new_z = z_jt[new_z];
+	
+    //Draw new actions for players 1 and 2
+
+    //CCP'S at current state 
+    CCP_state_m1 =  CP_true[state_m1i,1]~CP_true[state_m1i,2];
+   
+    //Player 1 action
+	act1t0 = rndus(1,1,seed).<=CCP_state_m1[1]; 
+	
+	//Player 2 action
+	act2t0 = rndus(1,1,seed).<=CCP_state_m1[2]; 
+		
+	tmrw_state = act1t0~act2t0~new_z;
+	state_data = state_data|tmrw_state;
+	action_data = action_data|(act1t0~act2t0);
+	state_m1 = tmrw_state;
+	t0 = t0+1;
+endo;
+State_Data_full = State_Data_full~state_data[1:Tdata,.] ;
+Action_Data_full = Action_Data_full~Action_data ;
+m0 = m0+1;
+endo;
+
+//Reshaping Data
+Action_Data = reshape( Action_Data_full, M*Tdata, 2);   //First M rows are from year 1, the second M from year two
+
+State_Data  = reshape( State_Data_full, M*Tdata, 3);
+
+//Assign State ID number to each state in the data (useful for estimation later)	
+state_ids = zeros(rows(state_data),1);
+s0 = 1;
+do while s0<=numstate; 
+//Find corresponding state in the data 
+loc_s = sumr(states[s0,.].==state_data).==cols(states);
+if maxc(loc_s).>0;
+	loc_s = indexcat(loc_s, maxc(loc_s));
+	state_ids[loc_s]=s0*ones(rows(loc_s),1);
+endif;
+s0 = s0+1;
+endo;    
+
+/*********************************/
+/* 4. Test of Eqm Beliefs        */
+/*********************************/
+
+
+    
+//4.1.1 Estimating CCPs - unrestricted - imposing the stationarity in the dgp
+//      Also collect summary data for each time period
+
+
+//Get state count
+Mdotki = state_ids.==seqa(1,1,numstate)';
+Mdotk = sumc(Mdotki);
+    
+//Get action count 
+
+M1k_1 = action_data[.,1].*Mdotki;
+M1k_1 = sumc(M1k_1);
+
+
+M0k_1 = (1-action_data[.,1]).*Mdotki;
+M0k_1 = sumc(M0k_1);
+
+    
+M1k_2 = action_data[.,2].*Mdotki;
+M1k_2 = sumc(M1k_2);
+
+
+M0k_2 = (1-action_data[.,2]).*Mdotki;
+M0k_2 = sumc(M0k_2);
+
+
+//Estimate CCPs using Raw frequency 
+p_u = (M1k_1./Mdotk)~(M1k_2./Mdotk); 
+repp_u = indexcat(Mdotk,0);
+if sumc(repp_u).>=0;
+p_u[repp_u,.] = 0.5*ones(rows(repp_u),2);
+endif;
+
+    //Bound pu in (0,1)
+    p_u = p_u - (p_u.>0.999).*(0.001);
+    p_u = p_u + (p_u.<0.001).*(0.001);
+
+//CCPs to be used in the test
+Unrestricted_CCPest = p_u[.,1]|p_u[.,2];
+
+
+
+//we estimate a vector \theta for each value of Y_1
+
+
+uniques = 0|1;           // unique values of the variable Y_1
+y0 = 1;
+p1_r = {};               //we collect the restricted p estimates here
+p2_r = {};
+keep = {};
+do while y0<=2;
+    //Find the points in the state space with (Y_1 = y0)
+    indy0 = indexcat(states[.,1], uniques[y0]);
+    numk = rows(indy0); 
+
+
+state_data_y0 = indexcat(state_data[.,1], uniques);
+ydata_y0 = action_data;
+zdata_y0 = state_ids;
+zdata_y0 = zdata_y0[state_data_y0];
+
+
+p_uhat = p_u[indy0,.];
+    
+
+
+M_k = Mdotk[indy0];    
+M1k_1_y0 = M1k_1[indy0];
+M0k_1_y0 = M0k_1[indy0];
+M1k_2_y0 = M1k_2[indy0];
+M0k_2_y0 = M0k_2[indy0];
+
+
+//"cloglike" is a procedure to find the (\theta, \lambda) that  maximizes the constrained likelihood.
+// It takes as an input an initial guess of \lambda, say \lambda^0 and two points in space of excluded variable zstar and finds the MLE \theta^1.
+//It then takes \theta^1 as given and finds the associated maximizer \lambda^1. It continues in this fashion
+//to convergence.
+
+proc (3) = cloglike(lam0) ;
+  local it, itt, pthetad1, theta_in, theta_out, lam_out, thetastar_in, thetastar_out, lamstar_in, lamstar_out, crit, lam_crit, theta_crit,  llik2, gradtheta,
+    gradltheta, ctheta, gradctheta, gradctheta11, gradctheta12, gradctheta1k, gradctheta21, gradctheta22, gradctheta2k, ptheta, thetastarlamstar, dmatrix, invd_grad, invertible, keep,
+    numrest, z2, z1, nozstara, nozstarb, tolp, converged;
+   
+    tolp = 1e-8;
+    it=1;
+    thetastar_in = (seqa(1,1,numstate)/50);
+    thetastar_out = ones(numstate,1);
+    lamstar_in = lam0;
+    numrest = rows(lam0);
+    lamstar_out = ones(numrest,1);
+    crit = maxc(abs((thetastar_in|lamstar_in) - (thetastar_out|lamstar_out)));
+    do while crit>=tolp;
+    //First step: given a guess of \lambda, find the MLE of \theta 
+    //Guess of initial theta
+    theta_in = thetastar_in;
+    theta_out = ones(numstate,1); 
+    theta_crit = maxc(abs(theta_in-theta_out));
+
+ 
+      itt = 1;
+    do while (theta_crit>tolp) .and (itt<=5000);
+      
+    ptheta = exp(theta_in)./(1+exp(theta_in));
+    pthetad1 = ptheta.*(1-ptheta); 
+    llik2 = (M_k/M|M_k/M).*ptheta.*(1-ptheta);
+    llik2 = -llik2.*eye(numstate);
+    gradltheta =  (M_k/M|M_k/M).*( (p_uhat[.,1]|p_uhat[.,2])-ptheta);
+ 
+    //create 8x20 matrix of derivatives of 8 constraints w.r.t. 20 parameters column by column    
+    gradctheta11 = (-( ptheta[numstate/2+2] - ptheta[numstate/2+1] )*(  (theta_in[3:numstate/2]-theta_in[2] )./(theta_in[2]-theta_in[1])^2));
+    gradctheta12 = (( ptheta[numstate/2+2] - ptheta[numstate/2+1] )*(  (theta_in[3:numstate/2]-theta_in[1] )./(theta_in[2]-theta_in[1])^2));    
+    gradctheta1k = eye(numrest).*(-( ptheta[numstate/2+2] - ptheta[numstate/2+1] )*(  (1)./(theta_in[2]-theta_in[1])));       
+    gradctheta21 = (( pthetad1[numstate/2+1] )*(  (theta_in[3:numstate/2]-theta_in[2] )./(theta_in[2]-theta_in[1])));
+    gradctheta22 = -(( pthetad1[numstate/2+2] )*(  (theta_in[3:numstate/2]-theta_in[1] )./(theta_in[2]-theta_in[1])));
+    gradctheta2k = eye(numrest).*pthetad1[numstate/2+3:numstate];
+    gradctheta = gradctheta11~gradctheta12~gradctheta1k~gradctheta21~gradctheta22~gradctheta2k;
+    ctheta = ptheta[numstate/2+3:numstate] - ptheta[numstate/2+1] - (ptheta[numstate/2+2] - ptheta[numstate/2+1] )*((theta_in[3:numstate/2]-theta_in[1])./(theta_in[2]-theta_in[1]) );    
+
+        
+     //DMatrix 
+      dmatrix = (llik2~gradctheta')|(gradctheta~zeros(numrest,numrest));  
+        //Check if dmatrix is invertible
+        invertible = abs(det(dmatrix))>0;
+        if invertible==1;
+       
+      gradtheta =  (gradltheta + gradctheta'lamstar_in)|ctheta;
+                        invd_grad  = inv(dmatrix)*gradtheta;
+                        theta_out = theta_in - invd_grad[1:numstate];
+      theta_out = theta_in - invd_grad[1:numstate];
+    
+    
+    theta_crit = maxc(abs(theta_in-theta_out));    
+    theta_in = theta_out;         
+        itt = itt+1;
+        else;
+            theta_crit = 0;
+        endif;
+            
+    endo; 
+     thetastar_out = theta_out;      
+    if (invertible==1).and (itt<=5000) ;
+    //Second step: given last estimate of \theta find the MLE of \lambda          
+    lamstar_out = lamstar_in - invd_grad[numstate+1:numstate+numrest]; 
+    
+
+    //Check for convergence and update estimates    
+       
+    crit = maxc(abs((thetastar_in|lamstar_in) - (thetastar_out|lamstar_out)));
+    lamstar_in  = lamstar_out;
+    thetastar_in = thetastar_out;
+    it = it+1;
+    else;
+        crit=0;
+        thetastarlamstar = zeros(numstate+numrest,1);
+    endif;
+    endo;
+    thetastarlamstar = thetastar_out|lamstar_out;
+    converged = itt<=5000;
+          retp(thetastarlamstar, invertible, converged);
+endp ;
+
+{estimates, keep_y0, converge} = cloglike(zeros(8,1));
+
+theta_out = estimates[1:numstate];
+ptheta = exp(theta_out)./(1+exp(theta_out));
+p1_r = p1_r|ptheta[1:numstate/2];
+p2_r = p2_r|ptheta[numstate/2+1:numstate];
+keep = keep|keep_y0;
+y0 = y0+1;
+    endo;  
+    
+    //Bound p_r in (0,1)
+    p1_r = p1_r - (p1_r.>0.999).*(0.001);
+    p1_r = p1_r + (p1_r.<0.001).*(0.001);
+    p2_r = p2_r - (p2_r.>0.999).*(0.001);
+    p2_r = p2_r + (p2_r.<0.001).*(0.001);
+   
+//Calculate LRT
+    
+  lrt_sim0 = 2*sumc(M1k_1.*(ln(p_u[.,1])-ln(p1_r) )+ M0k_1.*(ln(1-p_u[.,1])-ln(1-p1_r) )) + 2*sumc(M1k_2.*(ln(p_u[.,2])-ln(p2_r) )+ M0k_2.*(ln(1-p_u[.,2])-ln(1-p2_r) ));
+       
+    if minc(keep)==1;
+    lrt = lrt|lrt_sim0;
+    //mdotks = mdotks~mdotk;
+    estCCP = estCCP~(p1_r|p2_r);
+    rawestCCP = rawestCCP~(p_u[.,1]|p_u[.,2]);
+    endif;
+    kept= kept+keep;
+    convergence = convergence+converge;
+    
+    
+// -----------------------------------------------------------------------
+// 5.   Non Parametric Estimation of Payoffs and Beliefs
+// -----------------------------------------------------------------------
+
+//Estimate gfunctions and Beliefs for each period in the data
+
+
+np_gfun_est_sim0 = {};
+np_belief_est_sim0 = {};
+np_payoff_diff_est_sim0 = {};    
+np_payoff_est_sim0 = {};
+    
+    
+    //CCP estimates for period t0
+	Pi0 =  p_u[.,1]; 
+	Pj0 =  p_u[.,2]; 
+    
+    //Create player i q function for period t0
+    q_it0 = ln(Pi0./(1-Pi0));
+
+    
+    //Estimate gfunction of player i: Exploit the fact that Y_jt-1 and Z_jt are excluded from g
+    eqmpts = z_ex[1:4];
+    X = Pj0[eqmpts]~(1-Pj0[eqmpts]);
+    Y = q_it0[eqmpts];
+    g01 = (inv(X'X)*X'Y)'.*ones(numstate/2,1);
+    
+    eqmpts = z_ex[5:8];
+    X = Pj0[eqmpts]~(1-Pj0[eqmpts]);
+    Y = q_it0[eqmpts];
+    g02 = (inv(X'X)*X'Y)'.*ones(numstate/2,1);
+        
+    np_gfun_est_sim0 = g01|g02;
+    
+    
+    //Estimate Beliefs
+    b_jt0 =  (q_it0 - np_gfun_est_sim0[.,2])./( np_gfun_est_sim0[.,1]- np_gfun_est_sim0[.,2]);
+   
+   //Replace Beliefs at extreme poits with CCPs of player 2
+    b_jt0[z_ex] = Pj0[z_ex];
+
+    //Bound beliefs in (0,1)
+    b_jt0 = b_jt0 - (b_jt0.>0.999).*(0.999);
+    b_jt0 = b_jt0 + (b_jt0.<0.001).*(0.001);
+    np_belief_est_sim0 = b_jt0;
+  
+    //Estimate Payoff Differences using the fact that Y_it-1 enters in payoff but not in continuation values (conditional on Y_it)
+    np_payoff_diff_est_sim0 = np_gfun_est_sim0[1:numstate/2,.]-np_gfun_est_sim0[numstate/2+1:numstate,.];  
+
+    //Estimate New Entrant Payoffs exploiting knowledge about Incumbency payoffs 
+    np_payoff_est_sim0 = (profit1_1[numstate/2+1:numstate]~profit1_0[numstate/2+1:numstate]) + np_payoff_diff_est_sim0;
+
+
+np_gfun_est= np_gfun_est~np_gfun_est_sim0;
+np_belief_est = np_belief_est~np_belief_est_sim0;
+np_payoff_diff_est = np_payoff_diff_est~np_payoff_diff_est_sim0 ;    
+np_payoff_est = np_payoff_est~np_payoff_est_sim0;
+
+
+// -----------------------------------------------------------------------------------------
+//  6. Parametric Estimation of Payoffs and Beliefs using NPL
+// -----------------------------------------------------------------------------------------
+
+//Player 1 data needed for payoff estimation
+actions1 = action_data[.,1];
+Z1_1e = Z1_1[.,1]~Z1_1[.,3:4];
+Z1_0e = Z1_0[.,1]~Z1_0[.,3:4]; 
+
+//Procedure for estimating payoff parameters and beliefs
+//Takes as inputs player one beliefs about player 2 and player one ccps and returns parametric payoff and belief estimates  
+
+proc (4) = payoffs(B2_init, CP1_init ) ;
+  local  k0, bin, bout, crit, ZP1, e0_P1, e1_P1, zbarP1, ebarP1, FP_1_1, FP_1_0, FbarP_1, W1Pz, W1Pe, ztilde0, etilde0, ztilde1, etilde1,
+         x, restx, ydum, namesb, best, varest, convergence, kern, pin, pout, ctilde, LHS, pay1est, pay0est;
+    
+//NPL Loop begins here
+k0 = 1;
+bin = B2_init;
+bout = ones(numstate,1);
+pin = CP1_init;
+    pout = bout;
+    crit = maxc(abs(pin-pout));
+do while (crit.>tol).and(k0<=1);
+    ZP1 = bin.*Z1_1e + (1-bin).*Z1_0e;
+    e0_P1 = 0.5772156649 - ln(1-pin);
+    e1_P1 = 0.5772156649 - ln(pin);  
+    zbarP1 = pin.*ZP1; 
+    ebarP1 = pin.*e1_P1 + (1-pin).*e0_P1; 
+    
+    FP_1_1 = bin.*ftran_11 + (1-bin).*ftran_10;
+    FP_1_0 = bin.*ftran_01 + (1-bin).*ftran_00;
+    FbarP_1 = pin.*FP_1_1 + (1-pin).*FP_1_0;   
+    W1Pz = inv(eye(rows(FbarP_1))-betad*FbarP_1 )*zbarP1;
+    W1Pe = inv(eye(rows(FbarP_1))-betad*FbarP_1 )*ebarP1;
+    ztilde1 = (ZP1 + betad*FP_1_1*W1Pz);
+    ztilde0 = (zeros(rows(zbarP1), cols(zbarP1)) + betad*FP_1_0*W1Pz ) ;
+    etilde1 = (betad*FP_1_1*W1Pe);
+    etilde0 = (betad*FP_1_0*W1Pe) ;        
+    
+    //Assign ztildes and etildes to data
+    x = ztilde1[state_ids,.]~ztilde0[state_ids,.];
+    restx = etilde1[state_ids,.]~etilde0[state_ids,.];
+    ydum = actions1;
+    ydum = abs(ydum-2);
+    namesb = "alp1"$|"del1"$|"theta1";
+    {best, varest, convergence} = clogit(ydum,x,restx,namesb);
+    if convergence==1;
+     //Update Belief Estimates
+    kern = (ztilde1-ztilde0)*best + etilde1-etilde0;
+    pout = 1./(1+exp(-kern));
+    ctilde = betad*FP_1_1*W1Pz*best-betad*FP_1_0*W1Pz*best + etilde1-etilde0;
+    LHS = ln(pout./(1-pout)) - ctilde;
+    pay1est = Z1_1e*best;
+    pay0est = Z1_0e*best;
+    
+    bout =  ( LHS - pay0est)./( pay1est - pay0est);
+    //Bound beliefs in (0,1)
+    bout = (bout.>0).*bout;
+	bout = (bout.>1) + (bout.<=1).*bout;
+    crit = maxc(abs(pin-pout));
+    bin = bout;
+    pin = pout;
+    k0 = k0+1;
+    else;
+        crit=0;
+    endif;
+endo;
+
+          retp(best, bout, pout, convergence);
+endp ;
+
+
+
+
+
+// 6.1 Estimate Player 1's payoffs parametrically without imposing equilibrium restrictions
+
+//Initialize with non parametric estimates 
+
+// Use same period of data for parametric estimation as for test  
+B2_est = np_belief_est_sim0;
+CP1_est = p_u[.,1];
+
+{payest, belest, pest, convergence} = payoffs(B2_est, CP1_est ) ;
+if convergence==1;
+//Select belief and cp estimates for MC experiments
+sel = 3|8|13|18;
+
+p_payoff_est_no_eq = p_payoff_est_no_eq~payest;
+p_belief_est_no_eq = p_belief_est_no_eq~belest[sel];
+p_cp_est_no_eq = p_cp_est_no_eq~pest[sel];
+endif;
+
+//Estimate Player 1's payoffs parametrically imposing equilibrium restrictions
+ 
+//Initialize with non parametric estimates 
+
+// Use same period of data for parametric estimation as for test  
+B2_est = p_u[.,2];
+CP1_est = p_u[.,1];
+
+{payest, belest, pest, convergence} = payoffs(B2_est, CP1_est) ;
+
+if convergence==1;
+p_payoff_est_eq = p_payoff_est_eq~payest;
+p_belief_est_eq = p_belief_est_eq~belest[sel];
+p_cp_est_eq = p_cp_est_eq~pest[sel];
+endif;
+
+sim0 = sim0+1;
+endo;
+
+
+// -----------------------------------------------
+//      7. RESULTS FROM MONTE CARLO EXPERIMENTS
+// -----------------------------------------------
+
+//7.1 The Test
+
+pctgrid = 0.1|0.25|0.50|0.75|0.80|0.90|0.95|0.99;
+
+
+ordLRT = sortc(LRT,1);
+
+// Quantiles of the test statistics and of the Chi-square under the null
+qlrt = quantile(ordlrt,pctgrid);
+q_chi= cdfChii(pctgrid,16);
+
+"";
+"   -------------------------------------------------------------------------------------";
+"       MONTE CARLO EXPERIMENT: QUANTILES OF THE STATISTICS";
+"   -------------------------------------------------------------------------------------";
+"       Percentile      Q-Chi(16)        Q-LRT     Q-PEARSON  ";
+"   -------------------------------------------------------------------------------------";
+pctgrid~q_chi~qlrt;
+"   -------------------------------------------------------------------------------------";
+
+
+// Empirical distribution of P-values
+plrt = cdfChinc(ordlrt, 16, 0);
+q_plrt = quantile(plrt,1-pctgrid);
+
+"   -------------------------------------------------------------------------------------";
+"       MONTE CARLO EXPERIMENT: EMPIRICAL DISTRIBUTION OF PVALUES OF THE LRT STATISTIC";
+"   -------------------------------------------------------------------------------------";
+"       Percentile      Q-Pvalue-LRT ";
+"   -------------------------------------------------------------------------------------";
+(1-pctgrid)~q_plrt
+"   -------------------------------------------------------------------------------------";
+
+
+//The Following creates Figure 1 or 2 (depending on value of "bias" above)
+maxalp = 0.999;
+minalp = 0.001;
+numalp= 1000;
+incalp = (maxalp-minalp)/(numalp-1);
+alp_grid = seqa(minalp,incalp,numalp);
+ralp_grid = cdfChii(1-alp_grid,16);
+
+//Fraction of empirical test statistics that lie in rejection region given alpha
+simrejects = (ralp_grid.<=lrt');
+simrejectprob = sumr(simrejects)/rows(lrt);
+struct plotControl myPlot;
+myPlot = plotGetDefaults("xy");
+location = "top left";
+orientation = 0;
+label = "alpha"$|"Prob(rejection)";
+plotSetLegend(&myPlot, label, location, orientation);
+plotSetLegendFont(&myPlot, "arial", 24, "dark grey");
+//plotSetYLabel(&myPlot, "", "verdana", 10, "black");
+plotSetXLabel(&myPlot, "alpha", "verdana", 10, "black");
+plotSetBkdColor(&myPlot, "white");
+newStyle = { 1, 2, 3, 4, 5 };
+plotSetLineStyle(&myPlot, newStyle);
+newTh = 5;
+plotSetLineThickness(&myPlot, newTh);
+clrs = "black"$|"grey";
+plotSetLineColor(&myPlot, clrs);
+plotxy(myPlot, alp_grid, alp_grid~simrejectprob ) ;
+
+
+//7.2 Parametric Payoffs
+//Calculate MAB and MSE of payoff estimates both under eqm restrictions and without
+true_pay = theta_10|theta_12|theta_13;
+xtrue_pay = true_pay.*.(1|0);
+
+
+//Under Eqm Restrictions
+MAB_pay_eq = meanc(abs(p_payoff_est_eq-true_pay )');
+MAB_pay_eq = (MAB_pay_eq.*.(1|0))+((MAB_pay_eq./true_pay).*.(0|1));
+rMSE_pay_eq = sqrt(meanc( ((p_payoff_est_eq-true_pay).^2)' )); 
+rMSE_pay_eq= (rMSE_pay_eq.*.(1|0))+((rMSE_pay_eq./true_pay).*.(0|1) );
+
+
+//No Eqm Restrictions
+MAB_pay_no_eq = meanc(abs(p_payoff_est_no_eq-true_pay )'); 
+MAB_pay_no_eq = (MAB_pay_no_eq.*.(1|0))+((MAB_pay_no_eq./true_pay).*.(0|1));
+rMSE_pay_no_eq = sqrt(meanc( ((p_payoff_est_no_eq-true_pay).^2)' )); 
+rMSE_pay_no_eq= (rMSE_pay_no_eq.*.(1|0))+((rMSE_pay_no_eq./true_pay).*.(0|1) );
+
+
+//TABLE 3 in the Paper: TOP PANEL (payoffs)
+"";
+"   -------------------------------------------------------------------------------------";
+"       MONTE CARLO EXPERIMENT: ESTIMATES OF PAYOFF PARAMETERS";
+"   -------------------------------------------------------------------------------------";
+"       True             Equilibrium Restrictions           No Equilibrium Restrictions  ";
+"                           MAB         rMSE                     MAB         rMSE        ";
+"   -------------------------------------------------------------------------------------";
+xtrue_pay~MAB_pay_eq~rMSE_pay_eq~MAB_pay_no_eq~rMSE_pay_no_eq;
+
+
+"   -------------------------------------------------------------------------------------";
+"-";
+
+//7.3 Parametric Beliefs
+//Calculate MAB and MSE of belief estimates both under eqm restrictions and without at several points
+true_bel = beliefs_2[sel];
+xtrue_bel = (true_bel.*.(1|0));
+
+
+
+
+//Under Eqm Restrictions
+MAB_bel_eq = meanc(abs(p_belief_est_eq-true_bel )'); 
+MAB_bel_eq = (MAB_bel_eq.*.(1|0))+((MAB_bel_eq./true_bel).*.(0|1));
+rMSE_bel_eq = sqrt(meanc( ((p_belief_est_eq-true_bel).^2)' )); 
+rMSE_bel_eq = (rMSE_bel_eq.*.(1|0))+((rMSE_bel_eq./true_bel).*.(0|1));
+
+
+//No Eqm Restrictions
+MAB_bel_no_eq = meanc(abs(p_belief_est_no_eq-true_bel )');
+MAB_bel_no_eq = (MAB_bel_no_eq.*.(1|0))+((MAB_bel_no_eq./true_bel).*.(0|1));
+rMSE_bel_no_eq = sqrt(meanc( ((p_belief_est_no_eq-true_bel).^2)' )); 
+rMSE_bel_no_eq = (rMSE_bel_no_eq.*.(1|0))+((rMSE_bel_no_eq./true_bel).*.(0|1));
+
+
+//TABLE 3 in the Paper: MIDDLE PANEL (beliefs)
+"";
+"   -------------------------------------------------------------------------------------";
+"       MONTE CARLO EXPERIMENT: ESTIMATES OF BELIEF PARAMETERS";
+"   -------------------------------------------------------------------------------------";
+"       True             Equilibrium Restrictions           No Equilibrium Restrictions  ";
+"                           MAB         rMSE                     MAB         rMSE        ";
+"   -------------------------------------------------------------------------------------";
+xtrue_bel~MAB_bel_eq~rMSE_bel_eq~MAB_bel_no_eq~rMSE_bel_no_eq;
+
+
+"   -------------------------------------------------------------------------------------";
+"-";
+
+
+
+//7.4 Parametric CCPs
+//Calculate MAB and MSE of belief estimates both under eqm restrictions and without at several points
+true_CP = CP_true[sel,1];
+xtrue_CP = (true_CP.*.(1|0));
+ret = xlsWrite(xtrue_CP, "results_25042017.xlsx", "a24", 1, 0);
+
+//Under Eqm Restrictions
+MAB_CCP_eq = meanc(abs(p_cp_est_eq-true_CP )'); 
+MAB_CCP_eq = (MAB_CCP_eq.*.(1|0))+((MAB_CCP_eq./true_CP).*.(0|1));
+rMSE_CCP_eq = sqrt(meanc( ((p_cp_est_eq-true_CP).^2)' )); 
+rMSE_CCP_eq = (rMSE_CCP_eq.*.(1|0))+((rMSE_CCP_eq./true_CP).*.(0|1));
+
+
+//No Eqm Restrictions
+MAB_CCP_no_eq = meanc(abs(p_cp_est_no_eq-true_CP )');
+MAB_CCP_no_eq = (MAB_CCP_no_eq.*.(1|0))+((MAB_CCP_no_eq./true_CP).*.(0|1));
+rMSE_CCP_no_eq = sqrt(meanc( ((p_cp_est_no_eq-true_CP).^2)' )); 
+rMSE_CCP_no_eq = (rMSE_CCP_no_eq.*.(1|0))+((rMSE_CCP_no_eq./true_CP).*.(0|1));
+
+
+//TABLE 3 in the Paper: BOTTOM PANEL (CCPS)
+"";
+"   -------------------------------------------------------------------------------------";
+"       MONTE CARLO EXPERIMENT: ESTIMATES OF CCP PARAMETERS";
+"   -------------------------------------------------------------------------------------";
+"       True             Equilibrium Restrictions           No Equilibrium Restrictions  ";
+"                           MAB         rMSE                     MAB         rMSE        ";
+"   -------------------------------------------------------------------------------------";
+xtrue_CP~MAB_CCP_eq~rMSE_CCP_eq~MAB_CCP_no_eq~rMSE_CCP_no_eq;
+
+
+"   -------------------------------------------------------------------------------------";
+"-";
+
+//END OF PROGRAM
+
